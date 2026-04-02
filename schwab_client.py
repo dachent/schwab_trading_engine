@@ -2,11 +2,19 @@ from __future__ import annotations
 
 import json
 import logging
+import multiprocessing
+import os
+import queue
+import sys
+import threading
+import time
+import webbrowser
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any
-from urllib.parse import urlparse
+from typing import Any, Callable
+from urllib.parse import parse_qs, urlencode, urlparse
 
 import httpx
 from schwab import auth
@@ -17,12 +25,44 @@ from storage import CredentialStore, ensure_runtime_dirs, get_app_paths
 
 
 BASE_URL = "https://api.schwabapi.com"
-DEFAULT_CALLBACK_URL = "https://127.0.0.1:8182/"
+DEFAULT_CALLBACK_URL = "https://127.0.0.1:8182"
 DEFAULT_CALLBACK_TIMEOUT_SECONDS = 300.0
 LOGIN_TASK_TIMEOUT_SECONDS = int(DEFAULT_CALLBACK_TIMEOUT_SECONDS + 45)
+CALLBACK_PREFLIGHT_TIMEOUT_SECONDS = 30.0
+CALLBACK_PREFLIGHT_STATUS_PATH = "/schwab-tool-auth/status"
+SCHWAB_PY_STATUS_PATH = "/schwab-py-internal/status"
 
 
 logger = logging.getLogger("runner")
+
+
+def _run_loopback_callback_preflight_server(
+    callback_queue: multiprocessing.Queue[str],
+    callback_port: int,
+    callback_path: str,
+) -> None:
+    import flask
+
+    app = flask.Flask(__name__)
+
+    @app.route(callback_path)
+    def handle_callback() -> str:
+        callback_queue.put(flask.request.url)
+        return "Schwab local callback probe received. You may now close this window/tab."
+
+    @app.route(CALLBACK_PREFLIGHT_STATUS_PATH)
+    def status() -> str:
+        return "running"
+
+    with open(os.devnull, "w", encoding="utf-8") as devnull:
+        werkzeug_logger = logging.getLogger("werkzeug")
+        werkzeug_logger.setLevel(logging.ERROR)
+        old_stdout = sys.stdout
+        sys.stdout = devnull
+        try:
+            app.run(host="127.0.0.1", port=callback_port, ssl_context="adhoc", use_reloader=False)
+        finally:
+            sys.stdout = old_stdout
 
 
 class SchwabClientError(RuntimeError):
@@ -41,6 +81,7 @@ class SchwabClient:
         self.paths = ensure_runtime_dirs(get_app_paths(root))
         self.store = CredentialStore(self.paths.credentials_path)
         self.client = None
+        self._last_preflight_succeeded: bool | None = None
 
     def load_credentials(self) -> dict[str, Any]:
         return self.store.load()
@@ -84,11 +125,66 @@ class SchwabClient:
         if parsed.hostname != "127.0.0.1":
             raise SchwabClientError("Callback URL must use host 127.0.0.1.")
         if parsed.port is None:
-            raise SchwabClientError("Callback URL must include an explicit loopback port, for example https://127.0.0.1:8182/.")
+            raise SchwabClientError("Callback URL must include an explicit loopback port, for example https://127.0.0.1:8182.")
         if parsed.path and not parsed.path.startswith("/"):
             raise SchwabClientError("Callback URL path must start with '/'.")
         if parsed.query or parsed.fragment:
             raise SchwabClientError("Callback URL cannot contain query parameters or fragments.")
+
+    @staticmethod
+    def _callback_components(callback_url: str) -> tuple[int, str, str]:
+        parsed = urlparse(callback_url)
+        if parsed.port is None:
+            raise SchwabClientError("Callback URL must include an explicit loopback port.")
+        return parsed.port, parsed.path or "/", parsed.path or "<empty>"
+
+    def _wait_for_https_server(self, *, status_url: str, timeout_seconds: float, server: multiprocessing.Process) -> None:
+        deadline = time.time() + max(5.0, min(timeout_seconds, 15.0))
+        while time.time() < deadline:
+            if server.exitcode is not None:
+                raise auth.RedirectServerExitedError("Local callback listener exited before it started.")
+            try:
+                response = httpx.get(status_url, verify=False, timeout=1.0)
+            except httpx.HTTPError:
+                time.sleep(0.1)
+                continue
+            if response.status_code == 200:
+                return
+            time.sleep(0.1)
+        raise auth.RedirectServerExitedError("Local callback listener did not start in time.")
+
+    @contextmanager
+    def _callback_preflight_server(self, callback_url: str) -> Any:
+        callback_port, callback_path, _ = self._callback_components(callback_url)
+        callback_queue: multiprocessing.Queue[str] = multiprocessing.Queue()
+        server = multiprocessing.Process(
+            target=_run_loopback_callback_preflight_server,
+            args=(callback_queue, callback_port, callback_path),
+        )
+        server.start()
+        try:
+            self._wait_for_https_server(
+                status_url=f"https://127.0.0.1:{callback_port}{CALLBACK_PREFLIGHT_STATUS_PATH}",
+                timeout_seconds=CALLBACK_PREFLIGHT_TIMEOUT_SECONDS,
+                server=server,
+            )
+            yield callback_queue
+        finally:
+            if server.is_alive():
+                server.kill()
+            server.join(timeout=5)
+
+    def _wait_for_received_url(self, callback_queue: multiprocessing.Queue[str], timeout_seconds: float) -> str:
+        deadline = time.time() + timeout_seconds
+        while time.time() < deadline:
+            remaining = max(0.1, deadline - time.time())
+            try:
+                return callback_queue.get(timeout=min(remaining, 0.25))
+            except queue.Empty:
+                continue
+        raise auth.RedirectTimeoutError(
+            "Timed out waiting for a post-authorization callback. You can set a longer timeout by passing a value of callback_timeout."
+        )
 
     def _connect_from_existing_token(self, creds: Credentials):
         self.client = auth.client_from_access_functions(
@@ -101,25 +197,140 @@ class SchwabClient:
         return self.client
 
     @staticmethod
-    def _auth_error_message(exc: Exception, callback_url: str) -> str:
+    def _authorization_diagnostics(app_key: str, callback_url: str) -> dict[str, Any]:
+        parsed_callback = urlparse(callback_url)
+        auth_context = auth.get_auth_context(app_key, callback_url)
+        parsed_authorize = urlparse(auth_context.authorization_url)
+        query = parse_qs(parsed_authorize.query, keep_blank_values=True)
+        query["client_id"] = [f"...{app_key[-4:]}"]
+        if "state" in query:
+            query["state"] = ["[REDACTED]"]
+        redacted_query = urlencode(query, doseq=True)
+        return {
+            "callback_url": callback_url,
+            "callback_scheme": parsed_callback.scheme,
+            "callback_host": parsed_callback.hostname,
+            "callback_port": parsed_callback.port,
+            "callback_path": parsed_callback.path or "<empty>",
+            "authorize_redirect_uri": query.get("redirect_uri", [""])[0],
+            "authorize_url": parsed_authorize._replace(query=redacted_query).geturl(),
+        }
+
+    def _run_callback_preflight(
+        self,
+        callback_url: str,
+        timeout_seconds: float = CALLBACK_PREFLIGHT_TIMEOUT_SECONDS,
+        open_browser: Callable[[str], bool] | None = None,
+    ) -> None:
+        callback_port, _, display_path = self._callback_components(callback_url)
+        logger.info(
+            "Starting local callback preflight callback_url=%s scheme=https host=127.0.0.1 port=%s path=%s",
+            callback_url,
+            callback_port,
+            display_path,
+        )
+        opener = open_browser or webbrowser.open
+        with self._callback_preflight_server(callback_url) as callback_queue:
+            opened = opener(callback_url)
+            if not opened:
+                raise SchwabClientError("Unable to open the default browser for the local callback preflight.")
+            try:
+                self._wait_for_received_url(callback_queue, timeout_seconds)
+            except auth.RedirectTimeoutError as exc:
+                raise SchwabClientError(
+                    f"Local callback preflight failed for {callback_url}. "
+                    "The browser never reached the local callback listener. "
+                    "This points to local browser or certificate handling, not Schwab credentials. "
+                    f"Open {callback_url} directly, accept the browser security warning, and confirm the callback page loads."
+                ) from exc
+        logger.info("Local callback preflight succeeded callback_url=%s", callback_url)
+
+    def _monitor_schwab_py_status(self, callback_port: int, stop_event: threading.Event) -> None:
+        status_url = f"https://127.0.0.1:{callback_port}{SCHWAB_PY_STATUS_PATH}"
+        deadline = time.time() + 20.0
+        while time.time() < deadline and not stop_event.is_set():
+            try:
+                response = httpx.get(status_url, verify=False, timeout=1.0)
+            except httpx.HTTPError:
+                time.sleep(0.1)
+                continue
+            if response.status_code == 200:
+                logger.info("schwab-py callback listener reachable status_url=%s", status_url)
+                return
+            time.sleep(0.1)
+        if not stop_event.is_set():
+            logger.warning("schwab-py callback listener was not observed within the startup window status_url=%s", status_url)
+
+    def _connect_via_login_flow(self, creds: Credentials, interactive: bool, callback_timeout: float):
+        callback_port, _, display_path = self._callback_components(creds.callback_url)
+        diagnostics = self._authorization_diagnostics(creds.app_key, creds.callback_url)
+        logger.info(
+            "Starting schwab-py login flow callback_url=%s scheme=%s host=%s port=%s path=%s",
+            creds.callback_url,
+            diagnostics["callback_scheme"],
+            diagnostics["callback_host"],
+            diagnostics["callback_port"],
+            display_path,
+        )
+        logger.info("Schwab authorize preview authorize_url=%s", diagnostics["authorize_url"])
+        logger.info(
+            "Authorize redirect_uri matches callback=%s",
+            diagnostics["authorize_redirect_uri"] == creds.callback_url,
+        )
+
+        stop_event = threading.Event()
+        monitor = threading.Thread(
+            target=self._monitor_schwab_py_status,
+            args=(callback_port, stop_event),
+            daemon=True,
+        )
+        monitor.start()
+        try:
+            self.client = auth.client_from_login_flow(
+                creds.app_key,
+                creds.app_secret,
+                creds.callback_url,
+                str(self.paths.state_dir / "schwab-py-unused-token.json"),
+                enforce_enums=False,
+                token_write_func=self._token_write,
+                callback_timeout=callback_timeout,
+                interactive=interactive,
+            )
+        finally:
+            stop_event.set()
+            monitor.join(timeout=1.0)
+        return self.client
+
+    def _auth_error_message(self, exc: Exception, callback_url: str) -> str:
         if isinstance(exc, auth.RedirectTimeoutError):
+            if self._last_preflight_succeeded:
+                return (
+                    f"Timed out waiting for Schwab to redirect back to {callback_url}. "
+                    "The local callback preflight succeeded, so the listener is reachable. "
+                    "The remaining likely causes are that the Schwab developer app callback URL does not exactly match this value, "
+                    "or the browser did not complete the final redirect after Schwab approval."
+                )
             return (
                 f"Timed out waiting for Schwab to redirect back to {callback_url}. "
                 "Confirm the Schwab developer app callback URL exactly matches this value and approve the local certificate warning if your browser shows one."
             )
         if isinstance(exc, auth.RedirectServerExitedError):
+            port = urlparse(callback_url).port
             return (
                 f"Unable to start the local callback server on {callback_url}. "
-                "Make sure nothing else is using port 8182, then try again."
+                f"Make sure nothing else is using port {port}, then try again."
             )
         message = str(exc)
         lowered = message.lower()
         if isinstance(exc, ValueError) and ("callback url" in lowered or "hostname" in lowered):
-            return f"Invalid callback URL. It must exactly match {DEFAULT_CALLBACK_URL}."
+            return (
+                f"Invalid callback URL for Python loopback auth: {callback_url}. "
+                "It must use https, host 127.0.0.1, and an explicit port."
+            )
         if any(token in lowered for token in ("redirect_uri", "redirect uri", "invalid_client", "invalid_grant", "unauthorized", "mismatch")):
             return (
                 "Schwab rejected the OAuth redirect or token exchange. "
-                f"Confirm the Schwab developer app callback URL is exactly {DEFAULT_CALLBACK_URL}, including the trailing slash."
+                f"Confirm the Schwab developer app callback URL is exactly {callback_url}, including whether it omits a trailing slash."
             )
         return f"Schwab login failed: {message}"
 
@@ -144,21 +355,15 @@ class SchwabClient:
         creds = self._load_credentials()
         payload = self.store.load()
         has_token = "token" in payload and not force_login
+        self._last_preflight_succeeded = None
 
         try:
             if has_token:
                 self.client = self._connect_from_existing_token(creds)
             else:
-                self.client = auth.client_from_login_flow(
-                    creds.app_key,
-                    creds.app_secret,
-                    creds.callback_url,
-                    str(self.paths.state_dir / "schwab-token.json"),
-                    enforce_enums=False,
-                    token_write_func=self._token_write,
-                    callback_timeout=callback_timeout,
-                    interactive=interactive,
-                )
+                self._run_callback_preflight(creds.callback_url)
+                self._last_preflight_succeeded = True
+                self.client = self._connect_via_login_flow(creds, interactive, callback_timeout)
         except SchwabClientError:
             raise
         except Exception as exc:  # noqa: BLE001

@@ -9,7 +9,7 @@ from pathlib import Path
 
 from logging_setup import setup_runner_logging
 from schemas import ErrorInfo, TaskMetrics, TaskRequest, TaskResult, TaskStatus
-from storage import append_audit_record, atomic_write_json, init_db, read_json
+from storage import append_audit_record, atomic_write_json, init_db, read_json, redact_sensitive_data
 from tasks import TASKS
 
 
@@ -44,7 +44,7 @@ def main() -> int:
             error=ErrorInfo(type=type(exc).__name__, message=str(exc), traceback=traceback.format_exc()),
             metrics=TaskMetrics(duration_ms=0),
         )
-        atomic_write_json(result_path, result.model_dump(mode="json"))
+        atomic_write_json(result_path, redact_sensitive_data(result.model_dump(mode="json")))
         append_audit_record({"request": {"task_name": args.task}, "result": result.model_dump(mode="json")})
         return 2
 
@@ -63,7 +63,7 @@ def main() -> int:
             error=ErrorInfo(type="TaskNotFound", message=f"Unknown task: {request.task_name}"),
             metrics=TaskMetrics(duration_ms=max(0, int((time.time() - _START_TIME) * 1000))),
         )
-        atomic_write_json(result_path, result.model_dump(mode="json"))
+        atomic_write_json(result_path, redact_sensitive_data(result.model_dump(mode="json")))
         append_audit_record({"request": request.model_dump(mode="json"), "result": result.model_dump(mode="json")})
         return 3
 
@@ -94,7 +94,7 @@ def main() -> int:
             metrics=TaskMetrics(duration_ms=max(0, int((time.time() - _START_TIME) * 1000))),
         )
 
-    atomic_write_json(result_path, result.model_dump(mode="json"))
+    atomic_write_json(result_path, redact_sensitive_data(result.model_dump(mode="json")))
     append_audit_record({"request": request.model_dump(mode="json"), "result": result.model_dump(mode="json")})
     return result.return_code
 

@@ -487,6 +487,13 @@ class SchwabToolApp:
         if not app_key or not app_secret:
             messagebox.showwarning("Auth", "App key and app secret are required before login.")
             return
+        if callback_url.endswith("/"):
+            messagebox.showerror(
+                "Callback URL mismatch",
+                "Callback URL must exactly match the Schwab app entry. "
+                "Your current Schwab app is configured without trailing slashes, for example https://127.0.0.1:8182.",
+            )
+            return
         try:
             SchwabClient._validate_callback_url(callback_url)
         except SchwabClientError as exc:
@@ -502,13 +509,21 @@ class SchwabToolApp:
                 ("callback_url", callback_url),
             )
         )
-        force_login = credentials_changed or "token" not in current_credentials
+        updated_credentials = {
+            **current_credentials,
+            "app_key": app_key,
+            "app_secret": app_secret,
+            "callback_url": callback_url,
+        }
+        if credentials_changed:
+            updated_credentials.pop("token", None)
+        self.store.save(updated_credentials)
+
+        force_login = credentials_changed or "token" not in updated_credentials
         self._queue_task(
             "login",
             {
-                "app_key": app_key,
-                "app_secret": app_secret,
-                "callback_url": callback_url,
+                "use_stored_credentials": True,
                 "force_login": force_login,
             },
             timeout_seconds=LOGIN_TASK_TIMEOUT_SECONDS,
