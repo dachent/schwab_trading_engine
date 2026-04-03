@@ -78,7 +78,7 @@ class SchwabToolApp:
         self.current_preview_rows: list[dict[str, Any]] = []
         self.current_job_id = ""
 
-        self.root.title("Schwab Tool")
+        self.root.title("Schwab Trading Engine")
         self.root.geometry("1560x920")
         self.root.minsize(1280, 760)
 
@@ -100,6 +100,7 @@ class SchwabToolApp:
         profile = ExecutionProfile.model_validate(saved_profile) if saved_profile else ExecutionProfile()
 
         self.import_path_var = tk.StringVar(value=settings.get("import_path", ""))
+        self.export_dir_var = tk.StringVar(value=settings.get("export_dir", str(self.paths.exports_dir)))
         self.app_key_var = tk.StringVar(value=credentials.get("app_key", ""))
         self.app_secret_var = tk.StringVar(value=credentials.get("app_secret", ""))
         self.callback_url_var = tk.StringVar(value=credentials.get("callback_url", DEFAULT_CALLBACK_URL))
@@ -150,19 +151,23 @@ class SchwabToolApp:
         frame.grid(row=0, column=0, sticky="ew")
         for column in range(11):
             frame.columnconfigure(column, weight=0)
-        frame.columnconfigure(0, weight=1)
+        frame.columnconfigure(10, weight=1)
 
-        ttk.Entry(frame, textvariable=self.import_path_var).grid(row=0, column=0, sticky="ew", padx=(0, 8))
-        ttk.Button(frame, text="Import File", command=self._choose_import_file).grid(row=0, column=1, padx=4)
-        ttk.Button(frame, text="Validate", command=self._validate_import).grid(row=0, column=2, padx=4)
-        ttk.Button(frame, text="Login / Refresh Auth", command=self._login).grid(row=0, column=3, padx=4)
-        ttk.Button(frame, text="Refresh Accounts", command=self._refresh_accounts).grid(row=0, column=4, padx=4)
-        ttk.Button(frame, text="Refresh Quotes", command=self._refresh_quotes).grid(row=0, column=5, padx=4)
-        ttk.Button(frame, text="Place Orders", command=self._place_orders).grid(row=0, column=6, padx=4)
-        ttk.Button(frame, text="Refresh Orders", command=self._refresh_orders).grid(row=0, column=7, padx=4)
-        ttk.Button(frame, text="Refresh Portfolio", command=self._refresh_portfolio).grid(row=0, column=8, padx=4)
-        ttk.Button(frame, text="Export Snapshot", command=self._export_snapshot).grid(row=0, column=9, padx=4)
-        ttk.Button(frame, text="Open Template", command=self._open_template).grid(row=0, column=10, padx=(12, 0))
+        buttons = [
+            ("Login / Refresh Auth", self._login),
+            ("Refresh Accounts", self._refresh_accounts),
+            ("Refresh Portfolio", self._refresh_portfolio),
+            ("Refresh Orders", self._refresh_orders),
+            ("Open Import Template", self._open_template),
+            ("Import", self._choose_import_file),
+            ("Validate", self._validate_import),
+            ("Refresh Quotes", self._refresh_quotes),
+            ("Place Orders", self._place_orders),
+            ("Export", self._export_snapshot),
+        ]
+        for column, (label, command) in enumerate(buttons):
+            padx = (0, 4) if column == 0 else 4
+            ttk.Button(frame, text=label, command=command).grid(row=0, column=column, padx=padx)
 
     def _build_left_rail(self, parent: ttk.Frame) -> None:
         parent.columnconfigure(0, weight=1)
@@ -179,8 +184,18 @@ class SchwabToolApp:
         ttk.Label(auth_frame, text="Login Status").grid(row=3, column=0, sticky="w")
         ttk.Label(auth_frame, textvariable=self.login_status_var, width=30).grid(row=3, column=1, sticky="w")
 
+        files = ttk.LabelFrame(parent, text="Files", padding=10)
+        files.grid(row=1, column=0, sticky="ew", pady=(0, 12))
+        files.columnconfigure(1, weight=1)
+        ttk.Label(files, text="Import File").grid(row=0, column=0, sticky="w")
+        ttk.Entry(files, textvariable=self.import_path_var, width=34).grid(row=0, column=1, sticky="ew", padx=(0, 8))
+        ttk.Button(files, text="Browse...", command=self._choose_import_file).grid(row=0, column=2, sticky="ew")
+        ttk.Label(files, text="Export Folder").grid(row=1, column=0, sticky="w", pady=(8, 0))
+        ttk.Entry(files, textvariable=self.export_dir_var, width=34).grid(row=1, column=1, sticky="ew", padx=(0, 8), pady=(8, 0))
+        ttk.Button(files, text="Browse...", command=self._choose_export_dir).grid(row=1, column=2, sticky="ew", pady=(8, 0))
+
         execution = ttk.LabelFrame(parent, text="Execution", padding=10)
-        execution.grid(row=1, column=0, sticky="ew", pady=(0, 12))
+        execution.grid(row=2, column=0, sticky="ew", pady=(0, 12))
         execution.columnconfigure(1, weight=1)
         ttk.Label(execution, text="Order Template").grid(row=0, column=0, sticky="w")
         ttk.Combobox(execution, textvariable=self.order_template_var, values=[item.value for item in OrderTemplate], state="readonly").grid(row=0, column=1, sticky="ew")
@@ -195,7 +210,7 @@ class SchwabToolApp:
         ttk.Checkbutton(execution, text="Preview only", variable=self.preview_only_var).grid(row=5, column=0, columnspan=2, sticky="w")
 
         pricing = ttk.LabelFrame(parent, text="Limit Pricing", padding=10)
-        pricing.grid(row=2, column=0, sticky="ew", pady=(0, 12))
+        pricing.grid(row=3, column=0, sticky="ew", pady=(0, 12))
         pricing.columnconfigure(1, weight=1)
         ttk.Label(pricing, text="Method").grid(row=0, column=0, sticky="w")
         ttk.Combobox(pricing, textvariable=self.pricing_method_var, values=[item.value for item in LimitPricingMethod], state="readonly").grid(row=0, column=1, sticky="ew")
@@ -209,7 +224,7 @@ class SchwabToolApp:
         ttk.Entry(pricing, textvariable=self.tick_cap_var).grid(row=4, column=1, sticky="ew")
 
         refresh = ttk.LabelFrame(parent, text="Status Refresh", padding=10)
-        refresh.grid(row=3, column=0, sticky="ew")
+        refresh.grid(row=4, column=0, sticky="ew")
         refresh.columnconfigure(1, weight=1)
         ttk.Label(refresh, text="Lookback Days").grid(row=0, column=0, sticky="w")
         ttk.Entry(refresh, textvariable=self.lookback_days_var).grid(row=0, column=1, sticky="ew")
@@ -232,10 +247,10 @@ class SchwabToolApp:
         self.log_yscroll.grid(row=0, column=1, sticky="ns")
         self.logs_text.configure(yscrollcommand=self.log_yscroll.set)
 
-        self.notebook.add(self.orders_table, text="Orders Preview")
         self.notebook.add(self.accounts_table, text="Accounts")
-        self.notebook.add(self.order_status_table, text="Order Status")
         self.notebook.add(self.portfolio_table, text="Portfolio")
+        self.notebook.add(self.order_status_table, text="Order Status")
+        self.notebook.add(self.orders_table, text="Orders Preview")
         self.notebook.add(logs_frame, text="Logs")
 
     def _build_status_strip(self) -> None:
@@ -277,7 +292,7 @@ class SchwabToolApp:
         request_path = self.paths.jobs_dir / f"{request.request_id}.json"
         result_path = self.paths.results_dir / f"{request.request_id}.json"
         request_path.write_text(json.dumps(request.model_dump(mode="json"), indent=2), encoding="utf-8")
-        save_setting("import_path", self.import_path_var.get().strip())
+        self._persist_ui_settings()
 
         self.busy = True
         self.current_job_id = request.request_id
@@ -455,13 +470,34 @@ class SchwabToolApp:
         self.logs_text.insert("1.0", "\n".join(chunks))
 
     def _choose_import_file(self) -> None:
+        current_import_path = self.import_path_var.get().strip()
+        initial_dir = Path(current_import_path).expanduser().parent if current_import_path else self.paths.imports_dir
+        if not initial_dir.exists():
+            initial_dir = self.paths.imports_dir
         selected = filedialog.askopenfilename(
             title="Choose import workbook",
             filetypes=[("Excel workbooks", "*.xlsx *.xlsm"), ("All files", "*.*")],
-            initialdir=self.paths.imports_dir,
+            initialdir=str(initial_dir),
         )
         if selected:
             self.import_path_var.set(selected)
+
+    def _choose_export_dir(self) -> None:
+        current_export_dir = self.export_dir_var.get().strip()
+        initial_dir = Path(current_export_dir).expanduser() if current_export_dir else self.paths.exports_dir
+        if not initial_dir.exists():
+            initial_dir = self.paths.exports_dir
+        selected = filedialog.askdirectory(
+            title="Choose export folder",
+            initialdir=str(initial_dir),
+            mustexist=False,
+        )
+        if selected:
+            self.export_dir_var.set(selected)
+
+    def _persist_ui_settings(self) -> None:
+        save_setting("import_path", self.import_path_var.get().strip())
+        save_setting("export_dir", self.export_dir_var.get().strip())
 
     def _open_template(self) -> None:
         template_path = self.paths.imports_dir / "order_template.xlsx"
@@ -570,7 +606,13 @@ class SchwabToolApp:
         self._queue_task("refresh_portfolio", {})
 
     def _export_snapshot(self) -> None:
-        self._queue_task("export_snapshot", {"execution_profile": self._execution_profile_payload()})
+        self._queue_task(
+            "export_snapshot",
+            {
+                "execution_profile": self._execution_profile_payload(),
+                "export_dir": self.export_dir_var.get().strip(),
+            },
+        )
 
 
 def main() -> None:

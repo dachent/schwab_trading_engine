@@ -528,6 +528,110 @@ def test_ui_uses_current_python_when_venv_is_missing(
         shutil.rmtree(temp_root, ignore_errors=True)
 
 
+def test_ui_builds_workflow_action_bar_and_files_block(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    temp_root = _temp_dir()
+    paths = _temp_paths(temp_root)
+    settings = {
+        "import_path": str(paths.imports_dir / "orders.xlsx"),
+        "export_dir": str(paths.exports_dir / "manual-exports"),
+    }
+
+    monkeypatch.setattr(ui, "get_app_paths", lambda: paths)
+    monkeypatch.setattr(ui, "load_settings", lambda: settings)
+    monkeypatch.setattr(ui, "sanitize_runtime_artifacts", lambda _paths=None: None)
+    monkeypatch.setattr(ui.tk.Misc, "after", lambda self, delay, callback=None, *args: None)
+
+    root = _create_tk_root()
+    try:
+        app = ui.SchwabToolApp(root)
+        notebook_tabs = [app.notebook.tab(tab_id, option="text") for tab_id in app.notebook.tabs()]
+        action_bar = root.winfo_children()[0]
+        action_buttons = [
+            (int(child.grid_info()["column"]), child.cget("text"))
+            for child in action_bar.winfo_children()
+            if child.winfo_class() == "TButton"
+        ]
+        action_labels = [label for _, label in sorted(action_buttons)]
+
+        body = root.winfo_children()[1]
+        left_rail = body.winfo_children()[0]
+        sections = [
+            (int(child.grid_info()["row"]), child.cget("text"))
+            for child in left_rail.winfo_children()
+            if child.winfo_class() == "TLabelframe"
+        ]
+        section_labels = [label for _, label in sorted(sections)]
+
+        assert action_labels == [
+            "Login / Refresh Auth",
+            "Refresh Accounts",
+            "Refresh Portfolio",
+            "Refresh Orders",
+            "Open Import Template",
+            "Import",
+            "Validate",
+            "Refresh Quotes",
+            "Place Orders",
+            "Export",
+        ]
+        assert root.title() == "Schwab Trading Engine"
+        assert notebook_tabs == [
+            "Accounts",
+            "Portfolio",
+            "Order Status",
+            "Orders Preview",
+            "Logs",
+        ]
+        assert section_labels == ["Auth", "Files", "Execution", "Limit Pricing", "Status Refresh"]
+        assert app.import_path_var.get() == settings["import_path"]
+        assert app.export_dir_var.get() == settings["export_dir"]
+    finally:
+        root.destroy()
+        shutil.rmtree(temp_root, ignore_errors=True)
+
+
+def test_ui_queue_task_persists_import_and_export_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    temp_root = _temp_dir()
+    paths = _temp_paths(temp_root)
+    saved_settings: list[tuple[str, object]] = []
+
+    monkeypatch.setattr(ui, "get_app_paths", lambda: paths)
+    monkeypatch.setattr(ui, "load_settings", lambda: {})
+    monkeypatch.setattr(ui, "sanitize_runtime_artifacts", lambda _paths=None: None)
+    monkeypatch.setattr(ui, "save_setting", lambda key, value: saved_settings.append((key, value)))
+    monkeypatch.setattr(ui.messagebox, "showwarning", lambda *args, **kwargs: None)
+    monkeypatch.setattr(ui.tk.Misc, "after", lambda self, delay, callback=None, *args: None)
+
+    class FakeThread:
+        def __init__(self, target, daemon: bool) -> None:
+            self.target = target
+            self.daemon = daemon
+
+        def start(self) -> None:
+            return None
+
+    monkeypatch.setattr(ui.threading, "Thread", FakeThread)
+
+    root = _create_tk_root()
+    try:
+        app = ui.SchwabToolApp(root)
+        app.import_path_var.set(str(paths.imports_dir / "orders.xlsx"))
+        app.export_dir_var.set(str(paths.exports_dir / "manual-exports"))
+
+        queued = app._queue_task("refresh_accounts", {})
+
+        assert queued is True
+        assert ("import_path", str(paths.imports_dir / "orders.xlsx")) in saved_settings
+        assert ("export_dir", str(paths.exports_dir / "manual-exports")) in saved_settings
+    finally:
+        root.destroy()
+        shutil.rmtree(temp_root, ignore_errors=True)
+
+
 def test_ui_login_rejects_trailing_slash_callback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -741,6 +845,97 @@ def test_get_positions_snapshot_requests_positions_field(monkeypatch: pytest.Mon
         assert len(positions) == 1
         assert positions[0].symbol == "AAPL"
         assert positions[0].quantity == 3
+    finally:
+        shutil.rmtree(temp_root, ignore_errors=True)
+
+
+def test_task_export_snapshot_writes_to_requested_export_dir(monkeypatch: pytest.MonkeyPatch) -> None:
+    temp_root = _temp_dir()
+    paths = _temp_paths(temp_root)
+    target_dir = temp_root / "custom-exports"
+
+    snapshot_rows = {
+        "account_snapshots": [
+            {
+                "account_name": "Main",
+                "account_number": "12345678",
+                "account_hash": "hash-123",
+                "cash_available": 1000.0,
+                "liquidation_value": 1500.0,
+            }
+        ],
+        "position_snapshots": [
+            {
+                "account_name": "Main",
+                "account_number": "12345678",
+                "symbol": "AAPL",
+                "average_price": 100.0,
+                "quantity": 3,
+                "value": 300.0,
+                "day_pl": 6.0,
+            }
+        ],
+        "broker_orders": [
+            {
+                "account_name": "Main",
+                "account_number": "12345678",
+                "order_id": "OID-1",
+                "status": "FILLED",
+                "quantity": 3,
+                "symbol": "AAPL",
+                "price": 101.0,
+                "entered_time": "2025-01-01T10:00:00Z",
+                "time_in_force": "DAY",
+                "session": "NORMAL",
+                "cost_basis_method": "FIFO",
+                "status_details": "",
+            }
+        ],
+    }
+
+    monkeypatch.setattr(tasks, "get_app_paths", lambda: paths)
+    monkeypatch.setattr(tasks, "_load_snapshot_rows", lambda table_name: snapshot_rows[table_name])
+
+    try:
+        result = tasks.task_export_snapshot({"export_dir": str(target_dir)})
+
+        output_path = Path(result["export_path"])
+        assert output_path.parent == target_dir.resolve()
+        assert output_path.exists()
+        assert output_path.name.startswith("SchwabData_")
+    finally:
+        shutil.rmtree(temp_root, ignore_errors=True)
+
+
+def test_task_export_snapshot_falls_back_to_runtime_exports_dir(monkeypatch: pytest.MonkeyPatch) -> None:
+    temp_root = _temp_dir()
+    paths = _temp_paths(temp_root)
+
+    snapshot_rows = {
+        "account_snapshots": [
+            {
+                "account_name": "Main",
+                "account_number": "12345678",
+                "account_hash": "hash-123",
+                "cash_available": 1000.0,
+                "liquidation_value": 1500.0,
+            }
+        ],
+        "position_snapshots": [],
+        "broker_orders": [],
+    }
+
+    monkeypatch.setattr(tasks, "get_app_paths", lambda: paths)
+    monkeypatch.setattr(tasks, "_load_snapshot_rows", lambda table_name: snapshot_rows[table_name])
+    monkeypatch.setattr(tasks, "task_refresh_portfolio", lambda args: {"positions": []})
+    monkeypatch.setattr(tasks, "task_refresh_orders", lambda args: {"orders": []})
+
+    try:
+        result = tasks.task_export_snapshot({"export_dir": ""})
+
+        output_path = Path(result["export_path"])
+        assert output_path.parent == paths.exports_dir.resolve()
+        assert output_path.exists()
     finally:
         shutil.rmtree(temp_root, ignore_errors=True)
 
