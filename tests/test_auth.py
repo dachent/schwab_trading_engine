@@ -673,6 +673,78 @@ def test_complete_manual_login_reports_token_exchange_failure_after_callback_rec
         shutil.rmtree(temp_root, ignore_errors=True)
 
 
+def test_get_account_wraps_single_field_string(monkeypatch: pytest.MonkeyPatch) -> None:
+    temp_root = _temp_dir()
+    callback_url = f"https://127.0.0.1:{_free_port()}"
+    captured: dict[str, object] = {}
+
+    class StubResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {"ok": True}
+
+    class StubSession:
+        def get_account(self, account_hash: str, *, fields=None):
+            captured["account_hash"] = account_hash
+            captured["fields"] = fields
+            return StubResponse()
+
+    try:
+        client = SchwabClient(root=temp_root)
+        client.save_credentials("KEY1234", "SECRET5678", callback_url)
+        client.client = StubSession()
+
+        payload = client.get_account("hash-123", fields="positions")
+
+        assert payload == {"ok": True}
+        assert captured == {"account_hash": "hash-123", "fields": ["positions"]}
+    finally:
+        shutil.rmtree(temp_root, ignore_errors=True)
+
+
+def test_get_positions_snapshot_requests_positions_field(monkeypatch: pytest.MonkeyPatch) -> None:
+    temp_root = _temp_dir()
+    callback_url = f"https://127.0.0.1:{_free_port()}"
+    captured_fields: list[object] = []
+    try:
+        client = SchwabClient(root=temp_root)
+        client.save_credentials("KEY1234", "SECRET5678", callback_url)
+
+        monkeypatch.setattr(client, "get_account_hash_map", lambda: {"12345678": "hash-123"})
+        monkeypatch.setattr(client, "get_account_nickname_map", lambda: {"12345678": "Main"})
+
+        def fake_get_account(account_hash: str, fields=None):
+            captured_fields.append(fields)
+            return {
+                "securitiesAccount": {
+                    "positions": [
+                        {
+                            "instrument": {"symbol": "AAPL", "type": "EQUITY"},
+                            "longQuantity": 3,
+                            "shortQuantity": 0,
+                            "averagePrice": 100.0,
+                            "marketValue": 300.0,
+                            "currentDayProfitLoss": 6.0,
+                            "currentDayProfitLossPercentage": 2.0,
+                        }
+                    ]
+                }
+            }
+
+        monkeypatch.setattr(client, "get_account", fake_get_account)
+
+        positions = client.get_positions_snapshot()
+
+        assert captured_fields == ["positions"]
+        assert len(positions) == 1
+        assert positions[0].symbol == "AAPL"
+        assert positions[0].quantity == 3
+    finally:
+        shutil.rmtree(temp_root, ignore_errors=True)
+
+
 def test_auth_diagnostic_manual_mode(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     calls: dict[str, object] = {}
 

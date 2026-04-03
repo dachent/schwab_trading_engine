@@ -10,7 +10,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 from urllib.parse import parse_qs, urlencode, urlparse
 
 import httpx
@@ -671,8 +671,17 @@ class SchwabClient:
         accounts = prefs.get("accounts", [])
         return {entry.get("accountNumber", ""): entry.get("nickName", "") for entry in accounts}
 
-    def get_account(self, account_hash: str, fields: str | None = None) -> dict[str, Any]:
-        response = self.ensure_client().get_account(account_hash, fields=fields)
+    @staticmethod
+    def _normalize_account_fields(fields: str | Iterable[str] | None) -> list[str] | None:
+        if fields is None:
+            return None
+        if isinstance(fields, str):
+            return [fields]
+        return list(fields)
+
+    def get_account(self, account_hash: str, fields: str | Iterable[str] | None = None) -> dict[str, Any]:
+        normalized_fields = self._normalize_account_fields(fields)
+        response = self.ensure_client().get_account(account_hash, fields=normalized_fields)
         return self._response_json(response, f"Unable to load account {account_hash}")
 
     def get_accounts_snapshot(self) -> list[AccountSnapshot]:
