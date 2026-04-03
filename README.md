@@ -1,4 +1,4 @@
-# Schwab Tool
+# Schwab Trading Engine
 
 Local Python port of the Excel/VBA Schwab workflow.
 
