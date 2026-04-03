@@ -1,4 +1,5 @@
 import json
+import queue
 import shutil
 import socket
 import tkinter as tk
@@ -295,6 +296,32 @@ def test_connect_via_browser_callback_routes_received_url_through_shared_complet
         assert opened[1].startswith("https://api.schwabapi.com/v1/oauth/authorize?")
         assert calls["received_url"] == f"{callback_url}?code=abc123&state=oauth-state"
         assert calls["auth_context"] is not None
+    finally:
+        shutil.rmtree(temp_root, ignore_errors=True)
+
+
+def test_wait_for_callback_request_ignores_favicon() -> None:
+    temp_root = _temp_dir()
+    try:
+        client = SchwabClient(root=temp_root)
+        callback_queue: queue.Queue[CallbackRequest] = queue.Queue()
+        callback_queue.put(
+            CallbackRequest(
+                url="https://127.0.0.1:8182/favicon.ico",
+                request_path="/favicon.ico",
+                matched_callback=False,
+            )
+        )
+        expected = CallbackRequest(
+            url="https://127.0.0.1:8182/?code=abc123&state=oauth-state",
+            request_path="/",
+            matched_callback=True,
+        )
+        callback_queue.put(expected)
+
+        received = client._wait_for_callback_request(callback_queue, timeout_seconds=1.0)
+
+        assert received == expected
     finally:
         shutil.rmtree(temp_root, ignore_errors=True)
 

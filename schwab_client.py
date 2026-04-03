@@ -27,6 +27,7 @@ DEFAULT_CALLBACK_TIMEOUT_SECONDS = 300.0
 LOGIN_TASK_TIMEOUT_SECONDS = int(DEFAULT_CALLBACK_TIMEOUT_SECONDS + 45)
 CALLBACK_PREFLIGHT_TIMEOUT_SECONDS = 30.0
 CALLBACK_PREFLIGHT_STATUS_PATH = "/schwab-tool-auth/status"
+IGNORED_CALLBACK_PATHS = frozenset({"/favicon.ico"})
 
 
 logger = logging.getLogger("runner")
@@ -209,6 +210,8 @@ class SchwabClient:
                     request_path = self._normalize_callback_path(flask.request.path)
                     if request_path == status_path:
                         return "running"
+                    if request_path in IGNORED_CALLBACK_PATHS:
+                        return flask.Response(status=204)
                     callback_queue.put(
                         CallbackRequest(
                             url=flask.request.url,
@@ -265,6 +268,8 @@ class SchwabClient:
             try:
                 callback_request = callback_queue.get(timeout=min(remaining, 0.25))
             except queue.Empty:
+                continue
+            if callback_request.request_path in IGNORED_CALLBACK_PATHS:
                 continue
             return callback_request
         raise auth.RedirectTimeoutError(
