@@ -29,8 +29,9 @@ The production login path should continue to use the installed browser by defaul
 2. Open the app.
 3. Enter `App Key`, `App Secret`, and `Callback URI`.
 4. Click `Login / Refresh Auth`.
-5. Use `imports\order_template.xlsx` as the starting import template.
-6. If your browser shows a certificate warning for the local callback URL, approve it so the loopback redirect can complete.
+5. Use the `Files` block to choose an `Import File` and, optionally, an `Export Folder`.
+6. Use `imports\order_template.xlsx` as the starting import template.
+7. If your browser shows a certificate warning for the local callback URL, approve it so the loopback redirect can complete.
 
 The callback URL must exactly match the Schwab developer app entry, including whether it omits a trailing slash. The current app expects the no-trailing-slash form, for example `https://127.0.0.1:8182`.
 
@@ -47,6 +48,15 @@ The callback URL must exactly match the Schwab developer app entry, including wh
 - `logs\`: UI, runner, and audit logs
 - `state\app.db`: local snapshots and placed-order state
 - `state\credentials.json.dpapi`: encrypted credentials and token data
+
+## Workflow
+
+- The top action bar follows the trading workflow: `Login / Refresh Auth`, `Refresh Accounts`, `Refresh Portfolio`, `Refresh Orders`, `Open Import Template`, `Import`, `Validate`, `Refresh Quotes`, `Place Orders`, `Export`.
+- The left rail includes a `Files` block with separate `Import File` and `Export Folder` controls.
+- `Import` opens a workbook picker and fills the `Import File` field.
+- `Open Import Template` creates the template workbook if needed and points the import field at it.
+- `Export` writes a timestamped workbook into the selected export folder. If `Export Folder` is blank, the app falls back to the default `exports\` directory.
+- The main window title is `Schwab Trading Engine`, and the notebook order follows the workflow-oriented data sequence: `Accounts`, `Portfolio`, `Order Status`, `Orders Preview`, `Logs`.
 
 ## Notes
 

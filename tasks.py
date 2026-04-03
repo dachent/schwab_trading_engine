@@ -484,6 +484,7 @@ def _load_snapshot_rows(table_name: str) -> list[dict[str, Any]]:
 
 def task_export_snapshot(args: dict[str, Any]) -> dict[str, Any]:
     paths = ensure_runtime_dirs(get_app_paths())
+    export_dir_raw = str(args.get("export_dir", "")).strip()
     accounts = _load_snapshot_rows("account_snapshots")
     positions = _load_snapshot_rows("position_snapshots")
     orders = _load_snapshot_rows("broker_orders")
@@ -558,7 +559,9 @@ def task_export_snapshot(args: dict[str, Any]) -> dict[str, Any]:
             ]
         )
 
-    output_path = paths.exports_dir / f"SchwabData_{datetime.now().strftime('%Y%m%d-%H%M%S')}.xlsx"
+    output_dir = Path(export_dir_raw).expanduser() if export_dir_raw else paths.exports_dir
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir.resolve() / f"SchwabData_{datetime.now().strftime('%Y%m%d-%H%M%S')}.xlsx"
     workbook.save(output_path)
     return {
         "export_path": str(output_path),
