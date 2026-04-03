@@ -506,6 +506,28 @@ def test_ui_login_persists_credentials_but_writes_minimal_job_payload(
         shutil.rmtree(temp_root, ignore_errors=True)
 
 
+def test_ui_uses_current_python_when_venv_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    temp_root = _temp_dir()
+    paths = _temp_paths(temp_root)
+    fake_python = temp_root / "python.exe"
+    fake_python.write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(ui, "get_app_paths", lambda: paths)
+    monkeypatch.setattr(ui, "load_settings", lambda: {})
+    monkeypatch.setattr(ui, "sanitize_runtime_artifacts", lambda _paths=None: None)
+    monkeypatch.setattr(ui.sys, "executable", str(fake_python))
+
+    root = _create_tk_root()
+    try:
+        app = ui.SchwabToolApp(root)
+        assert app.python_exe == fake_python
+    finally:
+        root.destroy()
+        shutil.rmtree(temp_root, ignore_errors=True)
+
+
 def test_ui_login_rejects_trailing_slash_callback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import queue
 import subprocess
+import sys
 import threading
 import tkinter as tk
 from pathlib import Path
@@ -70,7 +71,7 @@ class SchwabToolApp:
         self.paths = ensure_runtime_dirs(get_app_paths())
         sanitize_runtime_artifacts(self.paths)
         self.store = CredentialStore(self.paths.credentials_path)
-        self.python_exe = self.paths.root / ".venv" / "Scripts" / "python.exe"
+        self.python_exe = self._resolve_python_exe()
         self.runner_path = self.paths.root / "runner.py"
         self.queue: queue.Queue[tuple[str, dict[str, Any]]] = queue.Queue()
         self.busy = False
@@ -85,6 +86,12 @@ class SchwabToolApp:
         self._build_layout()
         self._refresh_logs_view()
         self.root.after(150, self._drain_queue)
+
+    def _resolve_python_exe(self) -> Path:
+        venv_python = self.paths.root / ".venv" / "Scripts" / "python.exe"
+        if venv_python.exists():
+            return venv_python
+        return Path(sys.executable)
 
     def _load_initial_state(self) -> None:
         settings = load_settings()
