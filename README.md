@@ -8,6 +8,21 @@ Local Python port of the Excel/VBA Schwab workflow.
 & ".\.venv\Scripts\python.exe" ".\ui.py"
 ```
 
+## Auth Diagnostics
+
+Run the isolated auth helper when you want to debug login without exercising the rest of the app:
+
+```powershell
+& ".\.venv\Scripts\python.exe" ".\auth_diagnostic.py" manual --force-refresh
+& ".\.venv\Scripts\python.exe" ".\auth_diagnostic.py" auto --force-refresh
+```
+
+- `manual` prints the generated Schwab authorization URL, then asks you to paste the final redirect URL after login.
+- `auto` exercises the normal loopback callback capture path.
+- `--browser <name>` optionally passes a browser override through to the loopback login flow; the default remains your installed browser.
+
+The production login path should continue to use the installed browser by default. A real browser is a better fit than Playwright here because Schwab's OAuth flow depends on normal user-driven login, 2FA, trust prompts, and accepting the loopback certificate warning.
+
 ## First-use checklist
 
 1. Update the Schwab app callback URI to an explicit loopback URL such as `https://127.0.0.1:8182`.

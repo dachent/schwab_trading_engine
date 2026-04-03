@@ -320,6 +320,7 @@ def task_login(args: dict[str, Any]) -> dict[str, Any]:
     app_key = str(args.get("app_key", "")).strip()
     app_secret = str(args.get("app_secret", "")).strip()
     callback_url = str(args.get("callback_url", "")).strip()
+    requested_browser = str(args.get("requested_browser", "")).strip() or None
     if app_key and app_secret and callback_url:
         client.save_credentials(app_key, app_secret, callback_url)
     else:
@@ -328,8 +329,9 @@ def task_login(args: dict[str, Any]) -> dict[str, Any]:
         force_login=bool(args.get("force_login")),
         interactive=False,
         callback_timeout=DEFAULT_CALLBACK_TIMEOUT_SECONDS,
+        requested_browser=requested_browser,
     )
-    linked = client.get_account_numbers()
+    linked = client.last_verified_accounts() or client.get_account_numbers()
     return {
         "login_status": client.login_status(),
         "linked_account_count": len(linked),
